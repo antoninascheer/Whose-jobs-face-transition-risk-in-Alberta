@@ -1,0 +1,149 @@
+---
+title: "Time Series Estimation"
+author: "Scheer et al, 2022"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r "setup", message=F, warning=F, echo=FALSE}
+knitr::opts_chunk$set(
+  comment = NA,
+  echo = FALSE,
+  warning = F,
+  message = F,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+```{r libraries}
+library(here)
+library(tidyverse)
+library(gets)
+library(fastDummies)
+library(lubridate)
+# library(urca)
+# library(stargazer)
+# library(xtable)
+# library(ARDL)
+
+# library(plm)
+# library(lmtest)
+# library(plyr)
+
+library(multcomp)
+
+
+# library(jtools)
+# library(kableExtra)
+# library(huxtable)
+# library(broom.mixed)
+library(broom)
+library(extrafont)
+
+rm(list=ls())
+select <- dplyr::select
+#here()
+```
+
+# Data and Functions
+
+```{r get functions}
+source(here("code","functions_TS.R"))
+```
+
+```{r load data}
+df_raw <- readr::read_csv(here("data","use","full_data_TS_covariates.csv"))
+```
+
+# Co Variates
+
+```{r}
+standard_covariates <- c("bankr_corporate", "bankr_personal",
+                         "retail_trade_seasonally_adjusted",
+                         "domestic_export_total_of_all_merchandise")
+
+oil_variables <- c("active_wells","total_oil")
+```
+
+# Estimation Loop
+
+```{r}
+lag_specifications <- list(1,
+                           1:3,
+                           c(1:3,6,12))
+
+dv_interest <- c("emp_") # here e.g. "ft_" could be added to estimate for FT employees
+
+sectors_estimation_results <- list()
+results <- data.frame()
+
+for(ls in 1:length(lag_specifications)){
+  for(dvi in dv_interest){
+    dep_var_vector <- df_raw %>% select(starts_with(dvi)) %>% names
+    
+    for(dvar in dep_var_vector){
+      print(paste(lag_specifications[[ls]],dvi,dvar,sep = "-"))
+      
+      output <- est_fun_level(data = df_raw,
+                              dep_var = dvar,
+                              ar = 1,
+                              theory_variables = c("WTI","discount"),
+                              fix_theory = FALSE,
+                              vars_to_estimate = standard_covariates,
+                              fixed_effects = "month",
+                              lags_in_adl = lag_specifications[[ls]],
+                              gets_selection = TRUE)
+      
+      wti_terms <- output$final_model %>% tidy %>% filter(grepl("WTI",term)) %>% pull(term)
+      disc_terms <- output$final_model %>% tidy %>% filter(grepl("discount",term)) %>% pull(term)
+      
+      if(!identical(wti_terms,character())){
+        multcomp::glht(output$final_model,linfct = paste0(paste0(wti_terms,collapse = " + "),"=0")) %>% 
+          tidy %>% 
+          select(estimate,adj.p.value) %>% 
+          mutate(lag = ls,
+                 dep_var_type = dvi,
+                 dep_var = dvar) %>% 
+          relocate(dep_var_type,lag,dep_var) -> lincom_WTI
+      }
+      
+      
+      if(!identical(disc_terms,character())){
+        multcomp::glht(output$final_model,linfct = paste0(paste0(disc_terms,collapse = " + ")," = 0")) %>% 
+          tidy %>% 
+          select(estimate,adj.p.value) %>% 
+          mutate(lag = ls,
+                 dep_var_type = dvi,
+                 dep_var = dvar) %>% 
+          relocate(dep_var_type,lag,dep_var)-> lincom_discount
+      }
+      
+      
+      current <- data.frame()
+      if(exists("lincom_WTI")){current <- bind_rows(current,lincom_WTI %>% mutate(var = "WTI"))}
+      if(exists("lincom_discount")){current <- bind_rows(current,lincom_discount %>% mutate(var = "discount"))}
+      
+      results <- bind_rows(results,current)
+      
+      sectors_estimation_results[[paste0(dvar,"_",ls)]] <- output
+      
+      if(exists("lincom_discount")){rm(lincom_discount)}
+      if(exists("lincom_WTI")){rm(lincom_WTI)}
+      
+    }
+  }
+}
+```
+
+# Save Results
+
+```{r}
+# Save all estimation results by uncommenting below
+# save(sectors_estimation_results,file = here("data","temp","TS_sector_loop_models.RData"))
+
+# Save the most relevant information below
+write_csv(results,here("data","out","TS_loop_results_lincom.csv"))
+```
+

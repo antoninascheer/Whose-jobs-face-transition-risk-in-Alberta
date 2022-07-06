@@ -1,0 +1,373 @@
+---
+title: "VAR Estimation"
+author: "Scheer et al, 2022"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+knitr::opts_chunk$set(
+  eval = T,
+  echo = T,
+  message = F,
+  warning = F
+)
+```
+
+```{r}
+rm(list=ls())
+library(vars)
+library(urca)
+library(tidyverse)
+library(here)
+library(plotly)
+library(kableExtra)
+
+select <- dplyr::select
+```
+
+# Data and Functions
+
+Load the relevant data
+
+```{r}
+df <- read_csv(here("data","use","oxmetrics.csv"),na = ".", col_t = "Ddddd")
+```
+
+
+Load the functions used in this estimation
+
+```{r}
+source(here("code/functions_VAR.R"))
+```
+
+Data wrangling
+
+```{r}
+order = c("WTI", "emp_total", "discount", "total_oil")
+series <- ts(df[-1],start = 1976,frequency = 12)
+series <- na.trim(series)
+series <- series[,order]
+plot(series)
+```
+
+# Lag Selection
+
+Select the correct lag
+
+```{r}
+lagselection <- VARselect(series,type = "both",season = 12)
+
+lagselection$criteria %>% 
+  t() %>% 
+  as_tibble() %>%
+  mutate(Lag = 1:10) %>%
+  relocate(Lag) %>% 
+  setNames(gsub("(n)","",names(.),fixed=T)) %>% 
+  kable(digits = 3,
+        caption = "Lag Selection in a Trend and Intercept Specification with Annual Seasonality") %>% 
+  kable_styling(full_width = FALSE) %>% 
+  kable_paper()
+```
+
+# Estimation
+
+Use the Johansen Procedure for estimating the VAR
+
+```{r}
+cajo <- ca.jo(series, type = "eigen", ecdet = "trend", K = 2, season = 12,spec = "transitory")
+summary(cajo)
+```
+
+Output a table:
+
+```{r}
+cajo@cval %>% 
+  as_tibble() %>% 
+  setNames(gsub("pct","% CV",names(.))) %>% 
+  mutate(Rank = c("$r \\leq 3$","$r \\leq 2$","$r \\leq 1$","$r = 0$"),
+         `Test Stat.`= cajo@teststat) %>% 
+  relocate(Rank, `Test Stat.`) %>% 
+  kable(digits = 2, escape = FALSE, caption = "Johansen Test with 2 Lags, a Trend Specification and Annual Seasonality") %>% 
+  kable_paper() %>% 
+  kable_styling(full_width = FALSE) 
+```
+
+# Restricted Vector Error Correction Model
+
+```{r}
+rrr <- cajorls(cajo,r = 2)
+
+kable(rrr$rlm$coefficients,digits = 3,caption = "Restricted Vector Error Correction Model using OLS") %>% 
+  kable_paper() %>% 
+  kable_styling(full_width = FALSE)
+```
+
+Show the cointegrating relationships
+
+```{r}
+kable(rrr$beta,digits = 3,caption = "Co-Integrating Relationships") %>% 
+  kable_paper() %>% 
+  kable_styling(full_width = FALSE)
+```
+# Testing for Exogeneity of Alpha (OxMetrics)
+
+
+We test for exogeneity of alpha in OxMetrics 8. Here we include the OxMetrics 8 Code needed to confirm our results in the SM: 
+
+```{Ox, eval = FALSE}
+// Batch Code
+module("PcGive");
+package("PcGive", "Multiple-equation");
+usedata("oxmetrics.csv");
+system
+{
+    Y = emp_total, WTI, discount, total_oil;
+    Z = emp_total_1, emp_total_2, WTI_1, WTI_2, discount_1, discount_2, 
+        total_oil_1, total_oil_2, Trend;
+    U = Constant, Seasonal, Seasonal_1, Seasonal_2, Seasonal_3, 
+        Seasonal_4, Seasonal_5, Seasonal_6, Seasonal_7, Seasonal_8, 
+        Seasonal_9, Seasonal_10;
+}
+rank(2);
+constraints
+{
+&9=1;
+&10=0;
+&15=1;
+&14=0;
+
+
+
+}
+estimate("COINT", 2007-03-01, 0, 2020-09-01, 0);
+```
+
+
+```{Ox, eval = FALSE}
+// Batch code for SYS(13)
+module("PcGive");
+package("PcGive", "Multiple-equation");
+usedata("oxmetrics.csv");
+system
+{
+    Y = emp_total, WTI, discount, total_oil;
+    Z = emp_total_1, emp_total_2, WTI_1, WTI_2, discount_1, discount_2, 
+        total_oil_1, total_oil_2, Trend;
+    U = Constant, Seasonal, Seasonal_1, Seasonal_2, Seasonal_3, 
+        Seasonal_4, Seasonal_5, Seasonal_6, Seasonal_7, Seasonal_8, 
+        Seasonal_9, Seasonal_10;
+}
+rank(2);
+constraints
+{
+&9=1;
+&10=0;
+&15=1;
+&14=0;
+
+&2=0;
+&3=0;
+
+
+}
+estimate("COINT", 2007-03-01, 0, 2020-09-01, 0);
+
+```
+
+
+
+# Robustness Tests
+
+Variables to determine:
+
+-   Season yes or no (`season = 12`)
+-   `VARselect_type`: options are const, trend and both
+-   trace or eigen for the ca.jo test in `cajotesttype`
+-   `spec` which can be longrun or transitory
+-   `ecdet` which decides on the inclusion of the intercept or the trend in the cointegration, "none", "const" or "trend"
+
+After considering all possible models, it's clear that results are robust to using either 'trace' or 'eigen' for the ca.jo test in `cajotesttype`. We therefore choose `trace`. Similarly, `spec` (which can be longrun or transitory) does not influence results. We therefore choose `longrun`. Even `VARselect_type` is robust, where options are const, trend and both. To formulate the widest possible model, we choose `both`.
+
+
+```{r}
+var_list <- list()
+for(seas in c(0,12)){
+  for(seltype in c("both")) {
+    for(cajotype in c("trace")){
+      for(cajospec in c("longrun")){
+        for(cajoecdet in c("none","const","trend")){
+          print(paste(seas,seltype,cajotype,cajospec, cajoecdet,sep = "-"))
+          
+          run <- vecm_fun(df = df,
+                          name = paste(seas,seltype,cajotype,cajospec, cajoecdet,sep = "-"),
+                          season = seas,
+                          VARselect_type = seltype,
+                          spec = cajospec,
+                          ecdet = cajoecdet,
+                          cajotesttype = cajotype,
+                          cajotestpval = "1pct")
+          
+          var_list[[paste(seas,seltype,cajotype,cajospec, cajoecdet,sep = "_")]] <- run
+        }
+      }
+    }
+  }
+}
+```
+
+# Impulse Response Functions
+
+```{r}
+subset_var <- names(var_list)
+
+extract_irf(vecm_list = var_list[subset_var],
+            impulse = "WTI",variable = "emp_total") %>% 
+  group_by(model) %>% 
+  mutate(x = 1:n()) %>% 
+  ggplot(aes(x=x,y=emp_total,color=model)) + 
+  geom_line() -> plot
+
+ggplotly(plot)
+```
+
+
+# Plotting
+
+```{r}
+extract_irf(vecm_list = var_list,
+            impulse = "WTI",
+            variable = "emp_total") %>% 
+  group_by(model) %>% 
+  mutate(x = 1:n()) %>% 
+  ungroup %>% 
+  separate(col = model,sep = "-",
+           into = c("Seasonality","varselect","cajotest","cajospec","VECM Specification"),
+           remove = FALSE) %>% 
+  mutate(`VECM Specification` = case_when(`VECM Specification`=="none"~"No Intercept or Trend",
+                                          `VECM Specification`=="const"~"Intercept",
+                                          TRUE~stringr::str_to_title(`VECM Specification`)),
+         `VECM Specification` = factor(`VECM Specification`,levels = c("No Intercept or Trend","Intercept","Trend")),
+         Seasonality = case_when(Seasonality==0~"No Seasonality",
+                                 Seasonality==12~"Annual Seasonality")) %>% 
+  
+  
+  
+  
+  ggplot(aes(x=x,y=emp_total,color=model)) + 
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = emp_total_lower,ymax = emp_total_upper,fill=model),alpha = 0.3)+
+  geom_line(size = 1) + 
+  
+  facet_grid(Seasonality~`VECM Specification`)+
+  
+  scale_x_continuous(breaks = c(seq(2,12,2)))+
+  scale_y_continuous(labels = function(x){scales::comma(x*1000)})+
+  
+  scale_color_viridis_d(name = "Model")+
+  scale_fill_viridis_d(name = NULL, guide = FALSE)+
+  
+  labs(title = "Impulse Response Function",
+       subtitle = "US$1 Impulse to WTI",
+       x = "Months after Impulse",
+       y = "Total Employment") +
+  
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey"),
+        legend.key = element_rect(fill = NA))
+
+```
+
+```{r}
+extract_irf(vecm_list = var_list,
+            impulse = "discount",
+            variable = "emp_total") %>% 
+  group_by(model) %>% 
+  mutate(x = 1:n()) %>% 
+  ungroup %>% 
+  separate(col = model,sep = "-",
+           into = c("Seasonality","varselect","cajotest","cajospec","VECM Specification"),
+           remove = FALSE) %>% 
+  mutate(`VECM Specification` = case_when(`VECM Specification`=="none"~"No Intercept or Trend",
+                                          `VECM Specification`=="const"~"Intercept",
+                                          TRUE~stringr::str_to_title(`VECM Specification`)),
+         `VECM Specification` = factor(`VECM Specification`,levels = c("No Intercept or Trend","Intercept","Trend")),
+         Seasonality = case_when(Seasonality==0~"No Seasonality",
+                                 Seasonality==12~"Annual Seasonality")) %>% 
+  
+  
+  
+  
+  ggplot(aes(x=x,y=emp_total,color=model)) + 
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = emp_total_lower,ymax = emp_total_upper,fill=model),alpha = 0.3)+
+  geom_line(size = 1) + 
+  
+  facet_grid(Seasonality~`VECM Specification`)+
+  
+  scale_x_continuous(breaks = c(seq(2,12,2)))+
+  scale_y_continuous(labels = function(x){scales::comma(x*1000)})+
+  
+  scale_color_viridis_d(name = "Model")+
+  scale_fill_viridis_d(name = NULL, guide = FALSE)+
+  
+  labs(title = "Impulse Response Function",
+       subtitle = "US$1 Impulse to the WTI - WCS Discount",
+       x = "Months after Impulse",
+       y = "Total Employment") +
+  
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey"),
+        legend.key = element_rect(fill = NA)) 
+
+```
+
+```{r}
+extract_irf(vecm_list = var_list,
+            impulse = "total_oil",
+            variable = "emp_total") %>% 
+  group_by(model) %>% 
+  mutate(x = 1:n()) %>% 
+  ungroup %>% 
+  separate(col = model,sep = "-",
+           into = c("Seasonality","varselect","cajotest","cajospec","VECM Specification"),
+           remove = FALSE) %>% 
+  mutate(`VECM Specification` = case_when(`VECM Specification`=="none"~"No Intercept or Trend",
+                                          `VECM Specification`=="const"~"Intercept",
+                                          TRUE~stringr::str_to_title(`VECM Specification`)),
+         `VECM Specification` = factor(`VECM Specification`,levels = c("No Intercept or Trend","Intercept","Trend")),
+         Seasonality = case_when(Seasonality==0~"No Seasonality",
+                                 Seasonality==12~"Annual Seasonality")) %>% 
+  
+  
+  
+  
+  ggplot(aes(x=x,y=emp_total,color=model)) + 
+  geom_hline(aes(yintercept = 0)) +
+  geom_ribbon(aes(ymin = emp_total_lower,ymax = emp_total_upper,fill=model),alpha = 0.3)+
+  geom_line(size = 1) + 
+  
+  facet_grid(Seasonality~`VECM Specification`)+
+  
+  scale_x_continuous(breaks = c(seq(2,12,2)))+
+  scale_y_continuous(labels = function(x){scales::comma(x*1000)})+
+  
+  scale_color_viridis_d(name = "Model")+
+  scale_fill_viridis_d(name = NULL, guide = FALSE)+
+  
+  labs(title = "Impulse Response Function",
+       subtitle = "1M Impulse to Oil Production",
+       x = "Months after Impulse",
+       y = "Total Employment") +
+  
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey"),
+        legend.key = element_rect(fill = NA)) 
+```
